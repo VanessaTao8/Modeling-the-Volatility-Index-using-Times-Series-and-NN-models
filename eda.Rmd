@@ -1,0 +1,40 @@
+```{r}
+library(fBasics)
+
+Sys.setenv("RCParams.usetex" = TRUE)
+```
+
+
+# Plot the time series
+
+```{r}
+vix.ts <- read.csv("Team10_VIX history.csv")
+vix.ts$DATE <- as.Date(vix.ts$DATE, format="%m/%d/%Y")
+plot(ts(vix.ts$CLOSE, start=c(1990,1,2), frequency=260), ylab="VIX", main="VIX time series")
+```
+
+
+# Subset the time series to contain data after 2014
+```{r}
+vix.ts <- subset(vix.ts, DATE > as.Date("2014-01-01"))
+log.vix.ts <- ts(log(vix.ts$CLOSE), start=c(2014,1,1), frequency=260)
+sqr.vix.ts <- ts(vix.ts$CLOSE^2, start=c(2014,1,1), frequency=260)
+```
+
+
+# Summary statistics of time series before and after 2018
+```{r}
+vix.ts.before <- subset(vix.ts, DATE <= as.Date("2018-12-31"))
+vix.ts.after <- subset(vix.ts, DATE > as.Date("2018-12-31"))
+
+basicStats(vix.ts.before$CLOSE)
+basicStats(vix.ts.after$CLOSE)
+```
+
+
+# Visualization of trnasformed time series and their ACF
+```{r}
+par(mfrow=c(1,2))
+plot(log.vix.ts, xlab="Time", ylab=bquote(log(VIX)), main="log(VIX) over time")
+acf(log.vix.ts, main="ACF of log(VIX)")
+```

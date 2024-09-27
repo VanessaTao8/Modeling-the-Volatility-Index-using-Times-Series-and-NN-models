@@ -1,0 +1,165 @@
+```{r}
+library(rugarch)
+```
+
+
+```{r}
+make_ts <- function(ts.values, start.date = c(2014,1,1), frequency=260){
+  return(ts(ts.values,start=start.date, frequency=frequency))
+}
+
+# Function to get training data for 1-step ahead rolling prediction
+# f is the number of days already observed in the test set to be used back in the training data
+get_train_for_prediction <- function(train.ts.values, test.ts.values, f) {
+  if(f==0){
+    return(train.ts.values)
+  }
+  return(make_ts(c(train.ts.values, head(test.ts.values, f))))
+}
+
+
+# Function for rolling prediction
+rolling_predict <- function(train.ts, test.ts, garch_variation){
+  n <- length(test.ts)
+  preds <- c()
+  for(f in 1:n){
+    train.data <- get_train_for_prediction(train.ts, test.ts, f-1)
+    spec.egarch <- ugarchspec(variance.model=list(model = garch_variation, garchOrder=c(1,1)),
+                              mean.model=list(armaOrder=c(1,1), include.mean=T),
+                              distribution.model="std") 
+    
+    egarch.fit <- ugarchfit(spec.egarch, train.data, solver = 'hybrid')
+    fore <- ugarchforecast(egarch.fit, n.ahead=1)
+    new_data_point <- fore@forecast$seriesFor[1]
+    preds <- c(preds, new_data_point)
+  }
+  return(preds)
+}
+```
+
+
+```{r}
+vix.ts <- read.csv("Team10_VIX history.csv")
+vix.ts$DATE <- as.Date(vix.ts$DATE, format="%m/%d/%Y")
+vix.ts <- subset(vix.ts, DATE > as.Date("2014-01-01"))
+vix.ts.values <- make_ts(vix.ts$CLOSE)
+log.vix.ts <- make_ts(log(vix.ts$CLOSE))
+sqr.vix.ts <- make_ts(vix.ts$CLOSE^2)
+
+# Print start date of test observations
+print(paste("Test set start date: ", vix.ts$DATE[length(vix.ts$DATE)-29]))
+
+test_start_date <- c(2023,8,17)
+
+vix.ts.train <- make_ts(head(vix.ts.values, -30))
+vix.ts.test <- make_ts(tail(vix.ts.values, 30), start=c(2023,8,17))
+
+log.vix.ts.train <- make_ts(head(log.vix.ts, -30))
+log.vix.ts.test <- make_ts(tail(log.vix.ts, 30), start=c(2023,8,17))
+```
+
+
+```{r}
+spec.egarch <- ugarchspec(variance.model=list(model = "eGARCH", garchOrder=c(1,1)),
+                mean.model=list(armaOrder=c(1,1), arfima=T, include.mean=T),
+                distribution.model="std",
+                fixed.pars=list(arfima=1))   
+
+egarch.fit <- ugarchfit(spec.egarch, log.vix.ts.train, solver = 'hybrid')
+```
+
+```{r}
+par(mfrow = c(1, 2))
+acf(egarch.fit@fit$z, main="eGARCH(1,1)-ARIMA(1,1) residuals")
+acf(egarch.fit@fit$z^2, main="eGARCH(1,1)-ARIMA(1,1) squared residuals")
+```
+
+```{r}
+arma.egarch.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "eGARCH"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs eGARCH(1,1)-ARIMA(1,1,1) Predictions")
+lines(arma.egarch.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "eGARCH(1,1)-ARIMA(1,1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arma.egarch <- mean(abs(exp(arma.egarch.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of eGARCH(1,1)-ARIMA(1,1,1): ", mae.arma.egarch))
+```
+
+
+
+```{r}
+spec.egarch <- ugarchspec(variance.model=list(model = "iGARCH", garchOrder=c(1,1)),
+                mean.model=list(armaOrder=c(1,1), arfima=T, include.mean=T),
+                distribution.model="std",
+                fixed.pars=list(arfima=1))   
+
+igarch.fit <- ugarchfit(spec.egarch, log.vix.ts.train, solver = 'hybrid')
+```
+
+```{r}
+par(mfrow = c(1, 2))
+acf(igarch.fit@fit$z, main="iGARCH(1,1)-ARIMA(1,1,1) residuals")
+acf(igarch.fit@fit$z^2, main="iGARCH(1,1)-ARIMA(1,1,1) squared residuals")
+```
+
+```{r}
+arma.igarch.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "iGARCH"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs iGARCH(1,1)-ARIMA(1,1,1) Predictions")
+lines(arma.igarch.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "iGARCH(1,1)-ARIMA(1,1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arma.igarch <- mean(abs(exp(arma.igarch.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of iGARCH(1,1)-ARIMA(1,1,1): ", mae.arma.igarch))
+```
+
+```{r}
+spec.egarch <- ugarchspec(variance.model=list(model = "gjrGARCH", garchOrder=c(1,1)),
+                mean.model=list(armaOrder=c(1,1), arfima=T, include.mean=T),
+                distribution.model="std",
+                fixed.pars=list(arfima=1))   
+
+gjr.garch.fit <- ugarchfit(spec.egarch, log.vix.ts.train, solver = 'hybrid')
+```
+
+```{r}
+par(mfrow = c(1, 2))
+acf(gjr.garch.fit@fit$z, main="gjrGARCH(1,1)-ARMA(1,1) residuals")
+acf(gjr.garch.fit@fit$z^2, main="gjrGARCH(1,1)-ARMA(1,1) squared residuals")
+```
+
+```{r}
+arma.gjr.garch.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "gjrGARCH"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs gjrGARCH(1,1)-ARIMA(1,1) Predictions")
+lines(arma.gjr.garch.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "gjrGARCH(1,1)-ARIMA(1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arma.gjr.garch <- mean(abs(exp(arma.gjr.garch.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of gjrGARCH(1,1)-ARIMA(1,1): ", mae.arma.gjr.garch))
+```
+
+```{r}
+spec.egarch <- ugarchspec(variance.model=list(model = "apARCH", garchOrder=c(1,1)),
+                mean.model=list(armaOrder=c(1,1), arfima=T, include.mean=T),
+                distribution.model="std",
+                fixed.pars=list(arfima=1))   
+
+aparch.fit <- ugarchfit(spec.egarch, log.vix.ts.train, solver = 'hybrid')
+```
+
+```{r}
+par(mfrow = c(1, 2))
+acf(aparch.fit@fit$z, main="apARCH(1,1)-ARMA(1,1) residuals")
+acf(aparch.fit@fit$z^2, main="apARCH(1,1)-ARMA(1,1) squared residuals")
+```
+
+```{r}
+arma.ap.arch.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "apARCH"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs apARCH(1,1)-ARIMA(1,1) Predictions")
+lines(arma.ap.arch.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "apARCH(1,1)-ARIMA(1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arma.ap.arch <- mean(abs(exp(arma.ap.arch.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of apARCH(1,1)-ARIMA(1,1): ", mae.arma.ap.arch))
+```
+
+
+

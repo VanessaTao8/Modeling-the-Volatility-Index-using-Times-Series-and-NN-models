@@ -1,0 +1,143 @@
+
+```{r}
+library(greybox)
+library(fGarch)
+```
+
+
+```{r}
+make_ts <- function(ts.values, start.date = c(2014,1,1), frequency=260){
+  return(ts(ts.values,start=start.date, frequency=frequency))
+}
+
+# Function to get training data for 1-step ahead rolling prediction
+# f is the number of days already observed in the test set to be used back in the training data
+get_train_for_prediction <- function(train.ts.values, test.ts.values, f) {
+  if(f==0){
+    return(train.ts.values)
+  }
+  return(make_ts(c(train.ts.values, head(test.ts.values, f))))
+}
+
+select_arima_order <- function(ts.values, pmax, dmax, qmax){
+  best.aic <- Inf
+  best.orders <- NULL
+  
+  for(p in 1:pmax){
+    for(q in 1:qmax){
+      for(d in 1:dmax){
+        arima.mod <- arima(ts.values, order = c(p,d,q))
+        mod.aic <- AICc(arima.mod)
+        if(mod.aic < best.aic){
+          best.aic <- mod.aic
+          best.orders <- c(p,d,q)
+        }
+      }
+    }
+  }
+  return(best.orders)
+}
+
+select_arima_garch_order <- function(ts.values, pmax, qmax, mmax, nmax){
+  best.aic <- Inf
+  best.orders <- NULL
+  
+  for(p in 1:pmax){
+    for(q in 1:qmax){
+      for(m in 1:mmax){
+        for(n in 1:nmax){
+          arma.garch.mod <- garchFit(~arma(1,1)+garch(1,1), ts.values, trace=F)
+          mod.aic <- arma.garch.mod@fit$ics[1][[1]]
+          if(mod.aic < best.aic){
+            best.aic <- mod.aic
+            best.orders <- c(p,q,m,n)
+          }
+        }
+      }
+    }
+  }
+  return(best.orders)
+}
+
+# Function for rolling prediction
+rolling_predict <- function(train.ts, test.ts, model.name){
+  n <- length(test.ts)
+  preds <- c()
+  for(f in 1:n){
+    train.data <- get_train_for_prediction(train.ts, test.ts, f-1)
+    if(model.name == "gam"){
+      time.pts <- seq_along(train.data)
+      time.pts <- (time.pts - min(time.pts)) / max(time.pts)
+      gam.fit <- gam(train.data ~ s(time.pts))
+      new_data_point <- predict(gam.fit, newdata = data.frame(time.pts = 1))
+      preds <- c(preds, new_data_point)
+    } else if(model.name == "ar"){
+      ar_model <- arima(train.data, order = c(5, 0, 0))
+      new_data_point <- predict(ar_model, n.ahead=1)
+      preds <- c(preds, new_data_point$pred[1])
+    } else if(model.name == "arima"){
+      # Best selected order is (1,1,2) based on AIC selection
+      arima_model <- arima(train.data, order = c(1, 1, 2))
+      new_data_point <- predict(arima_model, n.ahead=1)
+      preds <- c(preds, new_data_point$pred[1])
+    } else if(model.name == "garch"){
+      garch.fit <- garchFit(~garch(1,1), train.data, trace=F)
+      new_data_point <- predict(garch.fit, n.ahead=1)$meanForecast[1]
+      preds <- c(preds, new_data_point)
+    } else if(model.name == "arma-garch"){
+      diff.train.data <- diff(train.data)
+      arma.garch.fit <- garchFit(~arma(1,1)+ garch(1,1), data=diff.train.data, trace = FALSE)
+      new_data_point <- predict(arma.garch.fit, n.ahead=1)$meanForecast[1]
+      preds <- c(preds, new_data_point)
+    }
+  }
+  return(preds)
+}
+```
+
+
+
+```{r}
+vix.ts <- read.csv("Team10_VIX history.csv")
+vix.ts$DATE <- as.Date(vix.ts$DATE, format="%m/%d/%Y")
+vix.ts <- subset(vix.ts, DATE > as.Date("2014-01-01"))
+vix.ts.values <- make_ts(vix.ts$CLOSE)
+log.vix.ts <- make_ts(log(vix.ts$CLOSE))
+sqr.vix.ts <- make_ts(vix.ts$CLOSE^2)
+
+# Print start date of test observations
+print(paste("Test set start date: ", vix.ts$DATE[length(vix.ts$DATE)-29]))
+
+test_start_date <- c(2023,8,17)
+
+vix.ts.train <- make_ts(head(vix.ts.values, -30))
+vix.ts.test <- make_ts(tail(vix.ts.values, 30), start=c(2023,8,17))
+
+log.vix.ts.train <- make_ts(head(log.vix.ts, -30))
+log.vix.ts.test <- make_ts(tail(log.vix.ts, 30), start=c(2023,8,17))
+```
+
+
+```{r}
+arima.orders <- select_arima_order(log.vix.ts.train, 5,1,5)
+print("Selected best ARIMA orders: \n")
+print(arima.orders)
+```
+
+```{r}
+arima.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "arima"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs ARIMA(1,1,1) Predictions")
+lines(arima.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "ARIMA(1,1,2) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arima <- mean(abs(exp(arima.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of ARIMA(1,1,2): ", mae.arima))
+```
+
+# Order selection selects same orders as baseline orders
+```{r}
+diff.log.vix.ts.train <- diff(log.vix.ts.train)
+arma.garch.orders <- select_arima_garch_order(diff.log.vix.ts.train,4,4,3,3)
+print(arma.garch.orders)
+```
+

@@ -1,0 +1,228 @@
+# Libraries
+```{r}
+library(mgcv)
+library(fGarch)
+```
+
+
+# Helper functions
+```{r}
+make_ts <- function(ts.values, start.date = c(2014,1,1), frequency=260){
+  return(ts(ts.values,start=start.date, frequency=frequency))
+}
+
+# Function to get training data for 1-step ahead rolling prediction
+# f is the number of days already observed in the test set to be used back in the training data
+get_train_for_prediction <- function(train.ts.values, test.ts.values, f) {
+  if(f==0){
+    return(train.ts.values)
+  }
+  return(make_ts(c(train.ts.values, head(test.ts.values, f))))
+}
+
+
+# Function for rolling prediction
+rolling_predict <- function(train.ts, test.ts, model.name){
+  n <- length(test.ts)
+  preds <- c()
+  for(f in 1:n){
+    train.data <- get_train_for_prediction(train.ts, test.ts, f-1)
+    if(model.name == "gam"){
+      time.pts <- seq_along(train.data)
+      time.pts <- (time.pts - min(time.pts)) / max(time.pts)
+      gam.fit <- gam(train.data ~ s(time.pts))
+      new_data_point <- predict(gam.fit, newdata = data.frame(time.pts = 1))
+      preds <- c(preds, new_data_point)
+    } else if(model.name == "ar"){
+      ar_model <- arima(train.data, order = c(5, 0, 0))
+      new_data_point <- predict(ar_model, n.ahead=1)
+      preds <- c(preds, new_data_point$pred[1])
+    } else if(model.name == "arima"){
+      arima_model <- arima(train.data, order = c(1, 1, 1))
+      new_data_point <- predict(arima_model, n.ahead=1)
+      preds <- c(preds, new_data_point$pred[1])
+    } else if(model.name == "garch"){
+      garch.fit <- garchFit(~garch(1,1), train.data, trace=F)
+      new_data_point <- predict(garch.fit, n.ahead=1)$meanForecast[1]
+      preds <- c(preds, new_data_point)
+    } else if(model.name == "arma-garch"){
+      diff.train.data <- diff(train.data)
+      arma.garch.fit <- garchFit(~ arma(1,1)+ garch(1,1), data=diff.train.data, trace = FALSE)
+      new_data_point <- predict(arma.garch.fit, n.ahead=1)$meanForecast[1]
+      preds <- c(preds, new_data_point)
+    }
+  }
+  return(preds)
+}
+```
+
+
+# Data Preparation
+```{r}
+vix.ts <- read.csv("Team10_VIX history.csv")
+vix.ts$DATE <- as.Date(vix.ts$DATE, format="%m/%d/%Y")
+vix.ts <- subset(vix.ts, DATE > as.Date("2014-01-01"))
+vix.ts.values <- make_ts(vix.ts$CLOSE)
+log.vix.ts <- make_ts(log(vix.ts$CLOSE))
+sqr.vix.ts <- make_ts(vix.ts$CLOSE^2)
+
+# Print start date of test observations
+print(paste("Test set start date: ", vix.ts$DATE[length(vix.ts$DATE)-29]))
+
+test_start_date <- c(2023,8,17)
+
+vix.ts.train <- make_ts(head(vix.ts.values, -30))
+vix.ts.test <- make_ts(tail(vix.ts.values, 30), start=c(2023,8,17))
+
+log.vix.ts.train <- make_ts(head(log.vix.ts, -30))
+log.vix.ts.test <- make_ts(tail(log.vix.ts, 30), start=c(2023,8,17))
+```
+
+
+
+
+
+# Trend models
+## Moving Average
+```{r}
+time.pts = c(1:length(log.vix.ts.train))
+time.pts = c(time.pts - min(time.pts))/max(time.pts)
+
+mav.fit = ksmooth(time.pts, log.vix.ts.train, kernel = "normal", bandwidth = 0.05)
+gam.fit <- gam(log.vix.ts.train~s(time.pts))
+
+
+ts.plot(log.vix.ts.train)
+lines(make_ts(mav.fit$y), col="red")
+lines(make_ts(fitted(gam.fit)), col="blue")
+legend("topleft", legend=c("VIX", "Splines", "Moving Average"), col=c("black", "red", "blue"), lty=1)
+```
+
+# Prediction using Splines
+```{r}
+gam.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "gam"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(2.2, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs GAM Predictions")
+
+lines(gam.preds, col = "red")
+
+legend("topright", legend = c("Test Data", "GAM Predictions"), col = c("blue", "red"), lty = 1)
+mae.gam <- mean(abs(exp(gam.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of GAM: ", mae.gam))
+```
+
+# AR family of models
+```{r}
+pacf(log.vix.ts.train, main="PACF of log(VIX)")
+```
+
+# Show AR model summary
+
+
+
+
+```{r}
+ar_model <- arima(log.vix.ts.train, order = c(5, 0, 0))
+show(ar_model)
+```
+
+```{r}
+ar.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "ar"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs AR(5) Predictions")
+lines(ar.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "AR(5) Predictions"), col = c("blue", "red"), lty = 1)
+mae.ar5 <- mean(abs(exp(ar.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of AR(5): ", mae.ar5))
+```
+```{r}
+arima.mod <- arima(log.vix.ts.train, order = c(1, 1, 1), method = "ML", include.mean = FALSE)
+```
+
+```{r}
+par(mfrow = c(1, 2))
+acf(residuals(arima.mod), main="ARIMA(1,1,1) residuals")
+acf(residuals(arima.mod)^2, main="ARIMA(1,1,1) squared residuals")
+```
+
+
+```{r}
+arima.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "arima"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs ARIMA(1,1,1) Predictions")
+lines(arima.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "ARIMA(1,1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arima <- mean(abs(exp(arima.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of ARIMA(1,1,1): ", mae.arima))
+```
+
+# Fitting GARCH(1,1) on the original time series
+```{r}
+garch.fit = tseries::garch(log.vix.ts, order=c(1,1), trace=FALSE)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+acf(residuals(garch.fit)[-1], main = "ACF of GARCH(1,1) Residuals", ylab = "ACF", xlab = "Lag")
+acf(residuals(garch.fit)[-1]^2, main = "ACF of GARCH(1,1) Squared Residuals", ylab = "ACF", xlab = "Lag")
+acf(residuals(garch.fit)[-1]^3, main = "ACF of GARCH(1,1) Cubed Residuals", ylab = "ACF", xlab = "Lag")
+acf(residuals(garch.fit)[-1]^4, main = "ACF of GARCH(1,1) Fourth Power Residuals", ylab = "ACF", xlab = "Lag")
+```
+# Forecasting with GARCH(1,1)
+```{r}
+garch.preds <- make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "garch"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs GARCH(1,1) Predictions")
+lines(garch.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "GARCH(1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.garch <- mean(abs(exp(garch.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of GARCH(1,1): ", mae.garch))
+```
+
+# ARIMA(1,1,1) + GARCH(1,1) joint modeling
+
+```{r}
+diff.log.vix.ts.train <- diff(log.vix.ts.train)
+arma.garch.fit <- garchFit(~ arma(1,1)+ garch(1,1), data=diff.log.vix.ts.train, trace = FALSE)
+```
+
+```{r}
+par(mfrow = c(1, 2))
+acf(residuals(arma.garch.fit, standardize=T), , main = "ARIMA-GARCH Residuals", ylab = "ACF", xlab = "Lag")
+acf(residuals(arma.garch.fit, standardize=T)^2, , main = "ARIMA-GARCH Squared Residuals", ylab = "ACF", xlab = "Lag")
+```
+
+
+```{r}
+arma.garch.preds <- head(tail(log.vix.ts, 31), 30) + make_ts(rolling_predict(log.vix.ts.train, log.vix.ts.test, "arma-garch"), start.date=test_start_date)
+plot(log.vix.ts.test, ylim = c(0, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs ARIMA(1,1,1) + GARCH(1,1) Predictions")
+lines(arma.garch.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "ARIMA(1,1,1) + GARCH(1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arma.garch <- mean(abs(exp(arma.garch.preds) - exp(log.vix.ts.test)))
+print(paste("Mean Absolute error of ARIMA(1,1,1) + GARCH(1,1): ", mae.arma.garch))
+```
+# Putting together all baseline plots
+```{r}
+plot(log.vix.ts.test, ylim = c(1, 3.2), col = "blue", ylab = "Log VIX", xlab = "Time", main = "Test Data vs GARCH(1,1) Predictions")
+lines(gam.preds, col = "red")
+lines(ar.preds, col = "green")
+lines(arima.preds, col = "purple")
+lines(garch.preds, col = "pink")
+lines(arma.garch.preds, col = "brown")
+legend("bottomright", 
+  legend = c("Test Data", "GAM Predictions", "AR(5) Predictions", "ARIMA(1,1,1) Predictions", "GARCH(1,1) Predictions", "ARMA(1,1,1)-GARCH(1,1) Predictions"),
+  col = c("blue", "red", "green", "purple", "pink", "brown"),
+  lty = c(1, 1, 1, 1, 1, 1),
+  cex = 0.8
+)
+```
+
+
+```{r}
+mae.table <- data.frame(cbind(c("GAM", "AR(5)", "ARIMA(1,1,1)", "GARCH(1,1)", "ARIMA(1,1,1)+GARCH(1,1)"), c(mae.gam, mae.ar5, mae.arima, mae.garch, mae.arma.garch)))
+colnames(mae.table) <- c("Model", "MAE")
+mae.table
+```
+
+
+

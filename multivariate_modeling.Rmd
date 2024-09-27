@@ -1,0 +1,156 @@
+```{r}
+library(tidyverse)
+library(corrplot)
+library(vars)
+library(forecast)
+```
+
+
+```{r}
+industry_vol <- read.csv("industry_volatilities.csv")
+industry_vol$industry_class <- tolower(substr(industry_vol$industry_class, 1, 5))
+
+industry_vol <- industry_vol %>%
+  pivot_wider(names_from = industry_class, values_from = volatility)
+
+colnames(industry_vol)[colnames(industry_vol) == "date"] <- "DATE"
+industry_vol$DATE <- as.Date(industry_vol$DATE)
+
+industry_vol <- subset(industry_vol, DATE > as.Date("2014-01-01"))
+industry_vol[, 2:length(industry_vol)] <- log(industry_vol[, 2:length(industry_vol)])
+```
+
+
+```{r}
+correlation_matrix <- cor(industry_vol[,-1], use = "complete.obs")
+color_scale <- colorRampPalette(c("blue", "white", "red"))(50)
+corrplot(correlation_matrix, method = "color", type = "upper", tl.col = "black", tl.srt = 45, addCoef.col = color_scale)
+```
+
+```{r}
+train.data <- head(industry_vol, -30)
+test.data <- tail(industry_vol, 30)
+```
+
+
+```{r}
+VARselect(train.data[, 2:length(train.data)], lag.max = 10, type="both")
+```
+
+```{r}
+model.var <- VAR(train.data[, 2:length(train.data)], p = 5, type="both")
+```
+
+```{r}
+vars::arch.test(model.var)
+```
+```{r}
+normality.test(model.var)
+```
+
+```{r}
+serial.test(model.var)
+```
+
+```{r}
+model.var.restricted <- restrict(model.var, thresh = qt(0.1/2,2174))
+model.var.restricted$varresult$VIX
+```
+
+# ARIMAX
+```{r}
+best_bic <- Inf
+best_orders <- NULL 
+
+X <- train.data[, 3:length(train.data)]
+y <- train.data$VIX[2:length(train.data$VIX)]
+for (p in 1:4){
+  for (q in 1:4){
+    model.temp <- arima(y, order = c(p,1,q), method = "ML", xreg = X[1:length(y),])
+    mod.bic <- BIC(model.temp)
+    if(mod.bic < best_bic){
+      best_bic <- mod.bic
+      best_orders <- c(p, q)
+    }
+  }
+}
+```
+
+```{r}
+best_orders
+```
+
+
+```{r}
+model.arimax <- arima(y, order = c(1,1,1), method = "ML", xreg = X[1:length(y),])
+```
+
+
+```{r}
+show(model.arimax)
+```
+
+```{r}
+zval <- model.arimax$coef/sqrt(diag(model.arimax$var.coef))
+pval <- 2*pnorm(-abs(zval))
+pval
+```
+
+```{r}
+par(mfrow=c(1,2))
+acf(model.arimax$residuals, main = "ARIMAX Residuals")
+acf(model.arimax$residuals^2, main = "ARIMAX Squared Residuals")
+```
+
+
+```{r}
+shapiro.test(model.arimax$residuals)
+```
+
+```{r}
+Box.test(model.arimax$residuals, lag = (3), type = "Ljung-Box", fitdf = (2))
+```
+
+```{r}
+
+make_ts <- function(ts.values, start.date = c(2014,1,1), frequency=260){
+  return(ts(ts.values,start=start.date, frequency=frequency))
+}
+
+# Function to get training data for 1-step ahead rolling prediction
+# f is the number of days already observed in the test set to be used back in the training data
+get_train_for_prediction <- function(train.df.values, test.df.values, f) {
+  if(f==0){
+    return(train.df.values)
+  }
+  return(rbind(train.df.values, head(test.df.values, f)))
+}
+
+rolling_predict <- function(train.df, test.df, model.name){
+  n <- length(test.df$DATE)
+  preds <- c()
+  for(f in 1:n){
+    train.data <- get_train_for_prediction(train.df, test.df, f-1)
+    
+    X <- train.data[, 3:length(train.data)]
+    y <- train.data$VIX[2:length(train.data$VIX)]
+    
+    model.arimax <- Arima(y, order = c(1,1,1), method = "ML", xreg = as.matrix(X[1:length(y),]))
+    fore <- forecast(model.arimax, xreg=as.matrix(X[length(y)+1,]))
+    new_data_point <- fore$mean[1]
+    preds <- c(preds, new_data_point)
+  }
+  return(preds)
+}
+```
+
+
+```{r}
+arimax.preds <- rolling_predict(train.data, test.data)
+plot(test.data$VIX, ylim = c(0, 3.2), col = "blue", type="l", ylab = "Log VIX", xlab = "Time", main = "Test Data vs ARIMAX(1,1,1) Predictions")
+lines(arimax.preds, col = "red")
+
+legend("bottomright", legend = c("Test Data", "ARIMAX(1,1,1) Predictions"), col = c("blue", "red"), lty = 1)
+mae.arimax <- mean(abs(exp(arimax.preds) - exp(test.data$VIX)))
+print(paste("Mean Absolute error of ARIMAX: ", mae.arimax))
+```
